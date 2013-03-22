@@ -110,7 +110,7 @@ bool PEPreparator::loadDirectory(int index, int size, char *dst, std::string con
 {
     Rva rva = mPEHeader.snd.directoryRva(index);
     if (rva == 0) {
-        note() << "Directory " << name << "doesn't exist (RVA is zero)" << std::endl;
+        note() << "Directory " << name << " doesn't exist (RVA is zero)" << std::endl;
         return false;
     }
     return loadFromImage(rva, size, dst, name);
@@ -119,7 +119,7 @@ bool PEPreparator::loadDirectory(int index, int size, char *dst, std::string con
 bool PEPreparator::loadExportDirectory()
 {
      return loadDirectory(mExportDirectory.index, mExportDirectory.size
-        , reinterpret_cast<char *>(&mExportDirectory), "export directory");
+        , reinterpret_cast<char *>(&mExportDirectory), "export");
 }
 
 void PEPreparator::Image::setNumofSections(int numofSections)
