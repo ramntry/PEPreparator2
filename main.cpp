@@ -46,5 +46,8 @@ int main(int argc, char **argv)
     if (!pePreparator.prepare()) {
         return EXIT_FAILURE;
     }
+    if (!pePreparator.printExportTable()) {
+        return EXIT_FAILURE;
+    }
     std::cout << "ok" << std::endl;
 }

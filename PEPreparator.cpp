@@ -30,6 +30,18 @@ PEPreparator::SectionHeader::SectionHeader()
     std::memset(this, 0, size);
 }
 
+PEPreparator::ExportDirectory::ExportDirectory()
+{
+    assert(sizeof(*this) == size);
+    std::memset(this, 0, size);
+}
+
+PEPreparator::Rva PEPreparator::NTOptionalHeader::directoryRva(int index) const
+{
+    assert(index >= 0 && index < numofDirectories);
+    return directories[index].rva;
+}
+
 int PEPreparator::PEHeader::size() const
 {
     return mMagicNumberSize + fst.size + snd.size;
@@ -68,6 +80,17 @@ bool PEPreparator::loadFromFile(int pos, int size, char *dst, std::string const 
     return true;
 }
 
+bool PEPreparator::loadFromImage(Rva rva, int size, char *dst, std::string const &name)
+{
+    int really_readed = mImage.read(dst, rva, size);
+    if (really_readed != size) {
+        error() << "Couldn't read from sections " << name << ": only " << really_readed << " of " << size
+            << " bytes was loaded" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 bool PEPreparator::loadDOSHeader()
 {
     return loadFromFile(0, mDOSHeader.size, reinterpret_cast<char *>(&mDOSHeader), "the DOS header");
@@ -81,6 +104,22 @@ bool PEPreparator::loadPEHeader()
     }
     return loadFromFile(mDOSHeader.peOffset, mPEHeader.size(), reinterpret_cast<char *>(&mPEHeader)
         , "the PE header");
+}
+
+bool PEPreparator::loadDirectory(int index, int size, char *dst, std::string const &name)
+{
+    Rva rva = mPEHeader.snd.directoryRva(index);
+    if (rva == 0) {
+        note() << "Directory " << name << "doesn't exist (RVA is zero)" << std::endl;
+        return false;
+    }
+    return loadFromImage(rva, size, dst, name);
+}
+
+bool PEPreparator::loadExportDirectory()
+{
+     return loadDirectory(mExportDirectory.index, mExportDirectory.size
+        , reinterpret_cast<char *>(&mExportDirectory), "export directory");
 }
 
 void PEPreparator::Image::setNumofSections(int numofSections)
@@ -124,6 +163,34 @@ std::string PEPreparator::Image::nameOfSectionAt(int index) const
     return std::string(&mSectionHeaders.at(index).name[0], SectionHeader::nameSize);
 }
 
+char PEPreparator::Image::at(Rva rva)
+{
+    int sectionIndex = -1;
+    for (size_t i = 0; i < mSectionHeaders.size(); ++i) {
+        if (mSectionHeaders[i].rva <= rva && rva < mSectionHeaders[i].rva + mSectionHeaders[i].virtualSize) {
+            sectionIndex = i;
+            break;
+        }
+    }
+    if (sectionIndex < 0) {
+        mAccessError = true;
+        return 0;
+    }
+    return mSections[sectionIndex][rva - mSectionHeaders[sectionIndex].rva];
+}
+
+int PEPreparator::Image::read(char *buf, Rva from, size_t size)
+{
+    mAccessError = false;
+    for (size_t i = 0; i < size; ++i) {
+        buf[i] = at(from + i);
+        if (mAccessError) {
+            return i;
+        }
+    }
+    return size;
+}
+
 bool PEPreparator::loadImage()
 {
     mImage.setNumofSections(mPEHeader.fst.numofSections);
@@ -137,12 +204,11 @@ bool PEPreparator::loadImage()
     mImage.initSectionSizes();
 
     for (int i = 0; i < mPEHeader.fst.numofSections; ++i) {
-        if (!loadFromFile(mImage.rawOffsetOfSectionAt(i), mImage.sectionAt(i).size(), &mImage.sectionAt(i)[0]
+        if (loadFromFile(mImage.rawOffsetOfSectionAt(i), mImage.sectionAt(i).size(), &mImage.sectionAt(i)[0]
                 , "a section")) {
-            return false;
+            note() << "Section " << mImage.nameOfSectionAt(i) << " is loaded (" << mImage.sectionAt(i).size()
+                << " bytes)" << std::endl;
         }
-        note() << "Section " << mImage.nameOfSectionAt(i) << " is loaded (" << mImage.sectionAt(i).size()
-            << " bytes)" << std::endl;
     }
     return true;
 }
@@ -179,6 +245,49 @@ bool PEPreparator::checkPEHeader()
         warning() << "Entry point have too high address" << std::endl;
     }
     note() << "Number of sections: " << mPEHeader.fst.numofSections << std::endl;
+    if (mPEHeader.fst.numofSections == 0) {
+        error() << "File doesn't contains any sections" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+std::string PEPreparator::getString(Rva rva)
+{
+    std::string res;
+    char curr_char = 0;
+    for (int i = 0; (curr_char = mImage.at(rva + i)) != '\0'; ++i) {
+        res.push_back(curr_char);
+    }
+    return res;
+}
+
+bool PEPreparator::printExportTable()
+{
+    mImage.clear();
+    std::vector<Dword> functions(mImage.iterator<Dword>(mExportDirectory.functionsRva)
+        , mImage.iterator<Dword>(mExportDirectory.functionsRva, mExportDirectory.numofFunctions));
+    std::vector<Dword> names(mImage.iterator<Dword>(mExportDirectory.namesRva)
+        , mImage.iterator<Dword>(mExportDirectory.namesRva, mExportDirectory.numofNames));
+    std::vector<Word> ordinals(mImage.iterator<Word>(mExportDirectory.ordinalsRva)
+        , mImage.iterator<Word>(mExportDirectory.ordinalsRva, mExportDirectory.numofNames));
+    if (mImage.error()) {
+        error() << "Couldn't read from sections export tables" << std::endl;
+        return false;
+    }
+
+    note() << "Exports (" << mExportDirectory.numofNames << " names, " << mExportDirectory.numofFunctions
+        << " functions. Ordinals base is " << mExportDirectory.ordinalsBase
+        << "):\n\t\t#Ord\t#RVA\t#Name\t\n";
+
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (ordinals[i] >= functions.size()) {
+            warning() << "Current ordinal (" << ordinals[i] << ") too high for functions table" << std::endl;
+            continue;
+        }
+        note() << (i + 1) << ")\t" << (ordinals[i] + mExportDirectory.ordinalsBase) << "\t" << std::hex
+            << functions[ordinals[i]] << "\t" << getString(names[i]) << std::dec << std::endl;
+    }
     return true;
 }
 
@@ -248,6 +357,7 @@ bool PEPreparator::prepare()
         && loadPEHeader()
         && checkPEHeader()
         && loadImage()
+        && loadExportDirectory()
         ;
 }
 
